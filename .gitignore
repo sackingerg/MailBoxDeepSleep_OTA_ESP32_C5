@@ -1,0 +1,7 @@
+build/
+*.bin
+*.elf
+*.map
+*.log
+.vscode/
+secrets.h
