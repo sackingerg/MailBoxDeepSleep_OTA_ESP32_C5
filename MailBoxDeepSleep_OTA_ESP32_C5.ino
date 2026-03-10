@@ -30,6 +30,7 @@ static void setBothLEDs(uint8_t externalState) {
     digitalWrite(ONBOARD_LED_PIN, !externalState);  // invert logic
   }
 }
+// Wait for mailbox to close
 static void waitForMailboxClose() {
   DBG_PRINTLN("Waiting for mailbox to CLOSE...");
 
@@ -44,7 +45,8 @@ static void waitForMailboxClose() {
   DBG_PRINTLN("Mailbox CLOSE confirmed (debounced).");
   DBG_FLUSH();
 }
-//
+//Perform a double flash to tell that box is closed
+
 static void ackDoubleFlash() {
   DBG_PRINTLN("Double flash ACK");
   for (int i = 0; i < 2; i++) {

@@ -19,7 +19,7 @@
 // ===============================
 #define SESSION_DURATION_MIN   120UL           // Total flashing session length
 
-#define BLINK_ON_SECONDS       1.0f           // ← Change this: LED on duration per flash
+#define BLINK_ON_SECONDS       1.0f           // ← Change this: LED on duration per flash - one decimal
 #define BLINK_CYCLE_SECONDS    14.0f            // ← Change this: full cycle time (start-to-start)
 
 #define FLASH_ON_MS            (uint32_t)(BLINK_ON_SECONDS * 1000UL)
