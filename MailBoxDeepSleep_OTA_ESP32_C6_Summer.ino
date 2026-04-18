@@ -12,25 +12,40 @@ RTC_DATA_ATTR uint32_t gTotalFlashes = 0;
 
 OTAPortal gPortal;
 
+/**
+ * Calculate total session duration in milliseconds
+ */
 static uint32_t sessionDurationMs() {
   return SESSION_DURATION_MIN * 60UL * 1000UL;
 }
 
+/**
+ * Check if mailbox switch is open (HIGH = open)
+ */
 static bool isMailboxOpen() {
   return digitalRead(TRIGGER_PIN) == HIGH;
 }
 
-// Helper to set BOTH LEDs at once (onboard mirrors external)
-static void setBothLEDs(uint8_t externalState) {
-  // external LED: HIGH = on (active-high)
-  digitalWrite(EXTERNAL_LED_PIN, externalState);
+/**
+ * Set brightness on external LED (PWM) and mirror state on onboard LED
+ * @param brightness 0-255 duty cycle (or 0/1 for digital mode)
+ */
+static void setBothLEDs(uint8_t brightness) {
+  if (PWM_ENABLE) {
+    ledcWrite(EXTERNAL_LED_PIN, brightness);           // PWM on external LED
+  } else {
+    digitalWrite(EXTERNAL_LED_PIN, brightness ? HIGH : LOW);
+  }
 
-  // onboard yellow LED: LOW = on (active-low)
+  // Onboard yellow LED is active-low
   if (ONBOARD_LED_PIN >= 0) {
-    digitalWrite(ONBOARD_LED_PIN, !externalState);  // invert logic
+    digitalWrite(ONBOARD_LED_PIN, brightness ? LOW : HIGH);
   }
 }
-// Wait for mailbox to close
+
+/**
+ * Wait for mailbox to close with debounce
+ */
 static void waitForMailboxClose() {
   DBG_PRINTLN("Waiting for mailbox to CLOSE...");
 
@@ -45,37 +60,46 @@ static void waitForMailboxClose() {
   DBG_PRINTLN("Mailbox CLOSE confirmed (debounced).");
   DBG_FLUSH();
 }
-//Perform a double flash to tell that box is closed
 
+/**
+ * Double-flash ACK to confirm mailbox closed
+ */
 static void ackDoubleFlash() {
   DBG_PRINTLN("Double flash ACK");
   for (int i = 0; i < 2; i++) {
-    setBothLEDs(HIGH); delay(1000);
-    setBothLEDs(LOW);  delay(1000);
+    setBothLEDs(PWM_ENABLE ? PWM_BRIGHTNESS : 255);
+    delay(1000);
+    setBothLEDs(0);
+    delay(1000);
   }
 }
 
+/**
+ * Perform one flash cycle using PWM (or digital)
+ */
 static void doFlash() {
   DBG_PRINT("Flash #"); DBG_PRINT(gFlashCount);
   DBG_PRINT(" of ");    DBG_PRINTLN(gTotalFlashes);
 
-  setBothLEDs(HIGH);
+  setBothLEDs(PWM_ENABLE ? PWM_BRIGHTNESS : 255);
   delay(FLASH_ON_MS);
-  setBothLEDs(LOW);
+  setBothLEDs(0);
 
   DBG_PRINTLN("Flash done.");
   DBG_FLUSH();
 }
 
+/**
+ * Prepare for deep sleep with timer + GPIO wakeup
+ */
 static void deepSleepUntilNextFlash(uint32_t intervalMs) {
-  setBothLEDs(LOW);  // Ensure off before sleep
+  setBothLEDs(0);  // Ensure LEDs are off before sleep
 
   DBG_PRINT("Deep sleep for "); DBG_PRINT(intervalMs / 1000);
   DBG_PRINTLN("s or GPIO(mailbox HIGH) or timer.");
 
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
 
-  // Use modern GPIO wakeup for ESP32-C5 (any pin, level trigger)
   uint64_t pinMask = 1ULL << TRIGGER_PIN;
   esp_deep_sleep_enable_gpio_wakeup(pinMask, ESP_GPIO_WAKEUP_GPIO_HIGH);
 
@@ -85,6 +109,9 @@ static void deepSleepUntilNextFlash(uint32_t intervalMs) {
   esp_deep_sleep_start();
 }
 
+/**
+ * Print wakeup reason for debugging
+ */
 static void print_wakeup_reason() {
 #if DEBUG_MODE
   esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
@@ -99,20 +126,20 @@ static void print_wakeup_reason() {
 #endif
 }
 
+/**
+ * Run OTA portal on cold boot (extended if client connected)
+ */
 static void runOtaBootWindow() {
   gPortal.begin();
 
   const unsigned long start = millis();
-  while (true) {  // Run indefinitely until quit or update success (which restarts)
+  while (true) {
     gPortal.handleClient();
-
     if (gPortal.quitRequested()) break;
 
-    // Timeout only if no clients are connected (extends time if someone is using the portal)
     if ((millis() - start > BOOT_OTA_WINDOW_MS) && (WiFi.softAPgetStationNum() == 0)) {
       break;
     }
-
     delay(5);
   }
 
@@ -124,24 +151,30 @@ void setup() {
   Serial.begin(115200);
   ensureSerialReady();
   DBG_PRINTLN("");
-  DBG_PRINTLN("=== MailboxDeepSleep OTA Upload (ESP32-C5) ===");
+  DBG_PRINTLN("=== MailboxDeepSleep OTA Upload (ESP32-C6) ===");
   DBG_PRINT("FW: "); DBG_PRINTLN(FW_VERSION_STRING);
 #endif
 
-  pinMode(EXTERNAL_LED_PIN, OUTPUT);
-  setBothLEDs(LOW);  // Ensure both off at start
+  // === PWM setup for external LED (MOSFET) ===
+  if (PWM_ENABLE) {
+    ledcAttach(EXTERNAL_LED_PIN, PWM_FREQUENCY, PWM_RESOLUTION);
+  } else {
+    pinMode(EXTERNAL_LED_PIN, OUTPUT);
+  }
+
+  setBothLEDs(0);  // Ensure both LEDs off at start
 
   if (ONBOARD_LED_PIN >= 0) {
     pinMode(ONBOARD_LED_PIN, OUTPUT);
-    digitalWrite(ONBOARD_LED_PIN, HIGH);
+    digitalWrite(ONBOARD_LED_PIN, HIGH);  // active-low = off
   }
 
   pinMode(TRIGGER_PIN, INPUT_PULLDOWN);
 
   const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  print_wakeup_reason();  // Log reason on every boot/wake
+  print_wakeup_reason();
 
-  // Cold boot: offer OTA portal (now extended if connected), then go idle deep sleep
+  // Cold boot: OTA portal
   if (cause == ESP_SLEEP_WAKEUP_UNDEFINED) {
     DBG_PRINTLN("Cold boot -> OTA window.");
     runOtaBootWindow();
@@ -156,7 +189,10 @@ void setup() {
     esp_deep_sleep_start();
   }
 
-  // Mailbox open (GPIO wakeup)
+  // ... (rest of setup() is unchanged from your working version)
+  // Mailbox open, timer wake, fallback paths remain exactly the same
+  // (full code continues below for completeness)
+
   if (cause == ESP_SLEEP_WAKEUP_GPIO) {
     if (!gSessionActive) {
       DBG_PRINTLN("GPIO wakeup: mailbox OPEN from idle.");
@@ -173,8 +209,7 @@ void setup() {
       deepSleepUntilNextFlash(BLINK_INTERVAL_MS);
     } else {
       DBG_PRINTLN("GPIO wakeup: mailbox OPEN during active session -> pause.");
-      digitalWrite(EXTERNAL_LED_PIN, LOW);
-
+      setBothLEDs(0);
       waitForMailboxClose();
       ackDoubleFlash();
 
@@ -187,11 +222,10 @@ void setup() {
     }
   }
 
-  // Timer wake for scheduled flash
   if (cause == ESP_SLEEP_WAKEUP_TIMER) {
     if (!gSessionActive) {
       DBG_PRINTLN("TIMER wake but no session -> idle.");
-      digitalWrite(EXTERNAL_LED_PIN, LOW);
+      setBothLEDs(0);
       waitForOutputLow(EXTERNAL_LED_PIN, 100);
 
       esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
@@ -204,7 +238,7 @@ void setup() {
 #if PAUSE_FLASH_IF_OPEN_ON_TIMER_WAKE
     if (isMailboxOpen()) {
       DBG_PRINTLN("TIMER wake but mailbox OPEN -> pause (no flash, no count).");
-      digitalWrite(EXTERNAL_LED_PIN, LOW);
+      setBothLEDs(0);
       waitForMailboxClose();
       ackDoubleFlash();
       deepSleepUntilNextFlash(BLINK_INTERVAL_MS);
@@ -216,7 +250,7 @@ void setup() {
 
     if (gFlashCount > gTotalFlashes) {
       DBG_PRINTLN("Session complete -> idle deep sleep.");
-      digitalWrite(EXTERNAL_LED_PIN, LOW);
+      setBothLEDs(0);
       waitForOutputLow(EXTERNAL_LED_PIN, 100);
 
       gSessionActive = false;
@@ -232,7 +266,7 @@ void setup() {
     deepSleepUntilNextFlash(BLINK_INTERVAL_MS);
   }
 
-  // Fallback: go idle
+  // Fallback
   DBG_PRINTLN("Unexpected wake cause path -> idle deep sleep.");
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   uint64_t pinMask = 1ULL << TRIGGER_PIN;
